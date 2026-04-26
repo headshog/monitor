@@ -4,6 +4,7 @@
 #define PATH_SIZE 256
 #define XNAME_SIZE 128
 #define XVALUE_SIZE 128
+#define SMACK_LABEL_SIZE 256
 
 #ifndef TASK_COMM_LEN
 #define TASK_COMM_LEN 16
@@ -22,6 +23,11 @@ struct syscall_event {
 
     /* Copy of userspace registers. */
     unsigned long args[6];
+    char smack_subj[SMACK_LABEL_SIZE];
+    char smack_obj[SMACK_LABEL_SIZE];
+    char smack_exec[SMACK_LABEL_SIZE];
+    char smack_mmap[SMACK_LABEL_SIZE];
+    __u32 smack_flags;
 
     union {
         struct {
@@ -155,6 +161,7 @@ struct syscall_event {
 struct monitor_config {
     __u32 enabled;
     __u32 filter_tst;
+    __u64 smack_blob_sizes_addr;
 };
 
 #endif

@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <string.h>
 
 #define PIN_PATH "/sys/fs/bpf/anis"
 #define MAPS_PATH PIN_PATH "/maps"
@@ -150,9 +151,13 @@ static int handle_event(void *ctx, void *data, size_t len)
 {
     struct syscall_event *e = data;
 
-    printf("{ \"syscall\": \"%s\", \"proc\": \"%s\", \"pid\": %d, \"euid\": %d, \"egid\": %d, ",
+    printf("{ \"syscall\": \"%s\", \"proc\": \"%s\", \"pid\": %d, \"euid\": %d, \"egid\": %d, "
+           "\"smack_subj\": \"%s\", \"smack_obj\": \"%s\", "
+           "\"smack_exec\": \"%s\", \"smack_mmap\": \"%s\", \"smack_flags\": %u, ",
         syscall_names[e->syscall_nr], e->comm,
-        e->pid, e->euid, e->egid);
+        e->pid, e->euid, e->egid,
+        e->smack_subj, e->smack_obj,
+        e->smack_exec, e->smack_mmap, e->smack_flags);
 
     switch (e->syscall_nr) {
     case SYS_open: printf(
@@ -334,12 +339,79 @@ void set_exited(int sig)
     exited = 1;
 }
 
+static bool lsm_has_smack(void)
+{
+    FILE *f = fopen("/sys/kernel/security/lsm", "r");
+    if (!f) {
+        return false;
+    }
+
+    char buf[1024];
+    bool has = false;
+    if (fgets(buf, sizeof(buf), f) != NULL) {
+        has = strstr(buf, "smack") != NULL;
+    }
+    fclose(f);
+    return has;
+}
+
+static __u64 find_kallsyms_symbol_addr(const char *symbol, bool *found)
+{
+    FILE *f = fopen("/proc/kallsyms", "r");
+    if (!f) {
+        return 0;
+    }
+
+    char line[512];
+    __u64 addr = 0;
+    bool hit = false;
+
+    while (fgets(line, sizeof(line), f) != NULL) {
+        unsigned long long cur_addr = 0;
+        char type = 0;
+        char name[256] = {};
+
+        if (sscanf(line, "%llx %c %255s", &cur_addr, &type, name) != 3) {
+            continue;
+        }
+        if (strcmp(name, symbol) != 0) {
+            continue;
+        }
+        addr = (__u64)cur_addr;
+        hit = true;
+        break;
+    }
+    fclose(f);
+
+    if (found) {
+        *found = hit;
+    }
+    return addr;
+}
+
+static void warn_if_smack_unavailable(void)
+{
+    static bool warned = false;
+    if (warned) {
+        return;
+    }
+    warned = true;
+
+    if (!lsm_has_smack()) {
+        fprintf(stderr,
+                "Warning: Smack is not active in /sys/kernel/security/lsm; "
+                "smack_* fields will be empty.\n");
+    }
+}
+
 
 int
 load(void)
 {
     struct syscall_monitor_bpf *skel;
     int err;
+
+    warn_if_smack_unavailable();
 
     if (!(skel = syscall_monitor_bpf__open_and_load())) {
         fprintf(stderr, "Failed to create skeleton\n");
@@ -372,7 +444,20 @@ load(void)
         goto END;
     }
     struct monitor_config cfg = {0};
+    bool sym_found = false;
     __u32 key = 0;
+
+    cfg.smack_blob_sizes_addr = find_kallsyms_symbol_addr("smack_blob_sizes", &sym_found);
+    if (!cfg.smack_blob_sizes_addr) {
+        if (sym_found) {
+            fprintf(stderr, "Warning: symbol 'smack_blob_sizes' found but address is hidden; "
+                    "smack_* fields may stay empty.\n");
+        } else {
+            fprintf(stderr, "Warning: symbol 'smack_blob_sizes' not found in /proc/kallsyms; "
+                    "smack_* fields may stay empty.\n");
+        }
+    }
+
     cfg.enabled = 0;
     cfg.filter_tst = 1;
     bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
@@ -430,15 +515,21 @@ run(int argc, char *argv[])
     struct ring_buffer *rb = 0;
     int err = 0;
 
+    warn_if_smack_unavailable();
+
     int cfg_fd;
     if ((cfg_fd = bpf_obj_get(MAPS_PATH "/config_map")) < 0) {
-        fprintf(stderr, "Failed to open the pinned map 'config_map'; error %d\n", err);
+        fprintf(stderr, "Failed to open the pinned map 'config_map'; error %d\n", cfg_fd);
         return 1;
     }
     struct monitor_config cfg = {0};
     __u32 key = 0;
+
+    if (bpf_map_lookup_elem(cfg_fd, &key, &cfg) != 0) {
+        cfg.filter_tst = 1;
+        cfg.smack_blob_sizes_addr = 0;
+    }
     cfg.enabled = 1;
-    cfg.filter_tst = 1;
     bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
 
     int events_fd;
