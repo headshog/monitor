@@ -1,0 +1,5 @@
+vmlinux.h
+syscall_monitor.skel.h
+*.o
+monitor
+*.swp
