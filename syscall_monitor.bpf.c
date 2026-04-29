@@ -219,6 +219,27 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 8192);
     __type(key, u64);
+    __type(value, struct smack_snapshot);
+} rename_smack_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, u64);
+    __type(value, struct smack_snapshot);
+} access_smack_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, u64);
+    __type(value, u8);
+} access_pending_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8192);
+    __type(key, u64);
     __type(value, struct dentry_call_ctx);
 } getxattr_ctx_map SEC(".maps");
 
@@ -373,6 +394,43 @@ static __always_inline void apply_smack_snapshot(struct syscall_event *e,
     __builtin_memcpy(e->smack_obj, snap->obj, sizeof(e->smack_obj));
     __builtin_memcpy(e->smack_exec, snap->exec, sizeof(e->smack_exec));
     __builtin_memcpy(e->smack_mmap, snap->mmap, sizeof(e->smack_mmap));
+}
+
+static __always_inline struct smack_snapshot *smack_scratch_get(void);
+
+static __always_inline void apply_smack_from_map(struct syscall_event *e,
+                                                 void *map,
+                                                 u64 id,
+                                                 int apply_condition)
+{
+    struct smack_snapshot *snap;
+
+    snap = bpf_map_lookup_elem(map, &id);
+    if (!snap) {
+        return;
+    }
+    if (apply_condition) {
+        apply_smack_snapshot(e, snap);
+    }
+    bpf_map_delete_elem(map, &id);
+}
+
+static __always_inline void capture_inode_smack_once(void *map,
+                                                     u64 id,
+                                                     struct inode *inode)
+{
+    struct smack_snapshot *snap;
+    struct smack_snapshot *existing;
+
+    existing = bpf_map_lookup_elem(map, &id);
+    if (existing || !inode) {
+        return;
+    }
+    snap = smack_scratch_get();
+    if (!snap || !capture_inode_smack(inode, snap)) {
+        return;
+    }
+    bpf_map_update_elem(map, &id, snap, BPF_ANY);
 }
 
 static __always_inline struct smack_snapshot *smack_scratch_get(void)
@@ -615,6 +673,21 @@ save_syscall_args(struct trace_event_raw_sys_enter *ctx)
     }
 
     return 1;
+}
+
+static __always_inline void access_pending_start(void)
+{
+    u64 id = bpf_get_current_pid_tgid();
+    u8 one = 1;
+    bpf_map_update_elem(&access_pending_map, &id, &one, BPF_ANY);
+    bpf_map_delete_elem(&access_smack_map, &id);
+}
+
+static __always_inline void access_pending_stop(void)
+{
+    u64 id = bpf_get_current_pid_tgid();
+    bpf_map_delete_elem(&access_pending_map, &id);
+    bpf_map_delete_elem(&access_smack_map, &id);
 }
 
 static __always_inline
@@ -1573,6 +1646,150 @@ int trace_exit_getdents(struct trace_event_raw_sys_exit *ctx)
     return 0;
 }
 
+SEC("tracepoint/syscalls/sys_enter_getdents64")
+int trace_enter_getdents64(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_getdents64")
+int trace_exit_getdents64(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx))) {
+        return 0;
+    }
+
+    e->getdents64.fd = e->args[0];
+    if (e->ret >= 0) {
+        fill_fd_smack(e, e->getdents64.fd);
+    }
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_access")
+int trace_enter_access(struct trace_event_raw_sys_enter *ctx)
+{
+    if (!save_syscall_args(ctx)) {
+        return 0;
+    }
+    access_pending_start();
+    return 1;
+}
+
+SEC("tracepoint/syscalls/sys_exit_access")
+int trace_exit_access(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        access_pending_stop();
+        return 0;
+    }
+
+    bpf_get_path(e->access.pathname, (char *)e->args[0]);
+    e->access.mode = e->args[1];
+
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &access_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    access_pending_stop();
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_faccessat")
+int trace_enter_faccessat(struct trace_event_raw_sys_enter *ctx)
+{
+    if (!save_syscall_args(ctx)) {
+        return 0;
+    }
+    access_pending_start();
+    return 1;
+}
+
+SEC("tracepoint/syscalls/sys_exit_faccessat")
+int trace_exit_faccessat(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        access_pending_stop();
+        return 0;
+    }
+
+    e->faccessat.dfd = e->args[0];
+    bpf_get_path(e->faccessat.pathname, (char *)e->args[1]);
+    e->faccessat.mode = e->args[2];
+    e->faccessat.flags = e->args[3];
+
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &access_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    access_pending_stop();
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_faccessat2")
+int trace_enter_faccessat2(struct trace_event_raw_sys_enter *ctx)
+{
+    if (!save_syscall_args(ctx)) {
+        return 0;
+    }
+    access_pending_start();
+    return 1;
+}
+
+SEC("tracepoint/syscalls/sys_exit_faccessat2")
+int trace_exit_faccessat2(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        access_pending_stop();
+        return 0;
+    }
+
+    e->faccessat2.dfd = e->args[0];
+    bpf_get_path(e->faccessat2.pathname, (char *)e->args[1]);
+    e->faccessat2.mode = e->args[2];
+    e->faccessat2.flags = e->args[3];
+
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &access_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    access_pending_stop();
+    return 0;
+}
+
+SEC("kprobe/security_inode_permission")
+int BPF_KPROBE(handle_security_inode_permission,
+               struct mnt_idmap *idmap,
+               struct inode *inode,
+               int mask)
+{
+    u64 id;
+    u8 *pending;
+
+    if (!should_monitor()) {
+        return 0;
+    }
+
+    id = bpf_get_current_pid_tgid();
+    pending = bpf_map_lookup_elem(&access_pending_map, &id);
+    if (!pending) {
+        return 0;
+    }
+    capture_inode_smack_once(&access_smack_map, id, inode);
+    return 0;
+}
+
 SEC("tracepoint/syscalls/sys_enter_link")
 int trace_enter_link(struct trace_event_raw_sys_enter *ctx)
 {
@@ -1657,7 +1874,6 @@ SEC("tracepoint/syscalls/sys_exit_link")
 int trace_exit_link(struct trace_event_raw_sys_exit *ctx)
 {
     u64 id;
-    struct smack_snapshot *snap;
     struct syscall_event *e;
 
     if (!(e = read_syscall_args(ctx))) {
@@ -1667,13 +1883,35 @@ int trace_exit_link(struct trace_event_raw_sys_exit *ctx)
     bpf_get_path(e->link.oldname, (char *)e->args[0]);
     bpf_get_path(e->link.newname, (char *)e->args[1]);
     id = bpf_get_current_pid_tgid();
-    snap = bpf_map_lookup_elem(&link_smack_map, &id);
-    if (snap) {
-        if (e->ret == 0) {
-            apply_smack_snapshot(e, snap);
-        }
-        bpf_map_delete_elem(&link_smack_map, &id);
+    apply_smack_from_map(e, &link_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_linkat")
+int trace_enter_linkat(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_linkat")
+int trace_exit_linkat(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        return 0;
     }
+
+    e->linkat.olddfd = e->args[0];
+    bpf_get_path(e->linkat.oldname, (char *)e->args[1]);
+    e->linkat.newdfd = e->args[2];
+    bpf_get_path(e->linkat.newname, (char *)e->args[3]);
+    e->linkat.flags = e->args[4];
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &link_smack_map, id, e->ret == 0);
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -1762,7 +2000,6 @@ SEC("tracepoint/syscalls/sys_exit_symlink")
 int trace_exit_symlink(struct trace_event_raw_sys_exit *ctx)
 {
     u64 id;
-    struct smack_snapshot *snap;
     struct syscall_event *e;
 
     if (!(e = read_syscall_args(ctx))) {
@@ -1772,13 +2009,134 @@ int trace_exit_symlink(struct trace_event_raw_sys_exit *ctx)
     bpf_get_path(e->symlink.oldname, (char *)e->args[0]);
     bpf_get_path(e->symlink.newname, (char *)e->args[1]);
     id = bpf_get_current_pid_tgid();
-    snap = bpf_map_lookup_elem(&symlink_smack_map, &id);
-    if (snap) {
-        if (e->ret == 0) {
-            apply_smack_snapshot(e, snap);
-        }
-        bpf_map_delete_elem(&symlink_smack_map, &id);
+    apply_smack_from_map(e, &symlink_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int trace_enter_unlinkat(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_unlinkat")
+int trace_exit_unlinkat(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        return 0;
     }
+
+    e->unlinkat.dfd = e->args[0];
+    bpf_get_path(e->unlinkat.pathname, (char *)e->args[1]);
+    e->unlinkat.flags = e->args[2];
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &unlink_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("kprobe/security_path_rename")
+int BPF_KPROBE(handle_security_path_rename,
+               const struct path *old_dir,
+               struct dentry *old_dentry,
+               const struct path *new_dir,
+               struct dentry *new_dentry,
+               unsigned int flags)
+{
+    u64 id;
+    struct inode *inode;
+
+    if (!should_monitor()) {
+        return 0;
+    }
+
+    id = bpf_get_current_pid_tgid();
+    inode = BPF_CORE_READ(old_dentry, d_inode);
+    capture_inode_smack_once(&rename_smack_map, id, inode);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_rename")
+int trace_enter_rename(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_rename")
+int trace_exit_rename(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        return 0;
+    }
+
+    bpf_get_path(e->rename.oldname, (char *)e->args[0]);
+    bpf_get_path(e->rename.newname, (char *)e->args[1]);
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &rename_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat")
+int trace_enter_renameat(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_renameat")
+int trace_exit_renameat(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        return 0;
+    }
+
+    e->renameat.olddfd = e->args[0];
+    bpf_get_path(e->renameat.oldname, (char *)e->args[1]);
+    e->renameat.newdfd = e->args[2];
+    bpf_get_path(e->renameat.newname, (char *)e->args[3]);
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &rename_smack_map, id, e->ret == 0);
+
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_renameat2")
+int trace_enter_renameat2(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_renameat2")
+int trace_exit_renameat2(struct trace_event_raw_sys_exit *ctx)
+{
+    u64 id;
+    struct syscall_event *e;
+
+    if (!(e = read_syscall_args(ctx))) {
+        return 0;
+    }
+
+    e->renameat2.olddfd = e->args[0];
+    bpf_get_path(e->renameat2.oldname, (char *)e->args[1]);
+    e->renameat2.newdfd = e->args[2];
+    bpf_get_path(e->renameat2.newname, (char *)e->args[3]);
+    e->renameat2.flags = e->args[4];
+    id = bpf_get_current_pid_tgid();
+    apply_smack_from_map(e, &rename_smack_map, id, e->ret == 0);
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -1868,7 +2226,6 @@ SEC("tracepoint/syscalls/sys_exit_getxattr")
 int trace_exit_getxattr(struct trace_event_raw_sys_exit *ctx)
 {
     u64 id;
-    struct smack_snapshot *snap;
     struct syscall_event *e;
 
     if (!(e = read_syscall_args(ctx))) {
@@ -1881,13 +2238,7 @@ int trace_exit_getxattr(struct trace_event_raw_sys_exit *ctx)
     e->getxattr.size = e->args[3];
     bpf_get_xattr_value(e->getxattr.value, e->getxattr.size, e->getxattr.addr);
     id = bpf_get_current_pid_tgid();
-    snap = bpf_map_lookup_elem(&getxattr_smack_map, &id);
-    if (snap) {
-        if (e->ret >= 0) {
-            apply_smack_snapshot(e, snap);
-        }
-        bpf_map_delete_elem(&getxattr_smack_map, &id);
-    }
+    apply_smack_from_map(e, &getxattr_smack_map, id, e->ret >= 0);
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -1978,7 +2329,6 @@ SEC("tracepoint/syscalls/sys_exit_setxattr")
 int trace_exit_setxattr(struct trace_event_raw_sys_exit *ctx)
 {
     u64 id;
-    struct smack_snapshot *snap;
     struct syscall_event *e;
 
     if (!(e = read_syscall_args(ctx))) {
@@ -1991,13 +2341,7 @@ int trace_exit_setxattr(struct trace_event_raw_sys_exit *ctx)
     e->setxattr.flags = e->args[4];
     bpf_get_xattr_value(e->setxattr.value, e->setxattr.size, (uint8_t *)e->args[2]);
     id = bpf_get_current_pid_tgid();
-    snap = bpf_map_lookup_elem(&setxattr_smack_map, &id);
-    if (snap) {
-        if (e->ret == 0) {
-            apply_smack_snapshot(e, snap);
-        }
-        bpf_map_delete_elem(&setxattr_smack_map, &id);
-    }
+    apply_smack_from_map(e, &setxattr_smack_map, id, e->ret == 0);
 
     bpf_ringbuf_submit(e, 0);
     return 0;

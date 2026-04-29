@@ -142,7 +142,26 @@ static const char *syscall_names[500] = {
     sys_entry(chown),    sys_entry(fchown),     sys_entry(close),
     sys_entry(exit),     sys_entry(exit_group), sys_entry(umask),
     sys_entry(unlink),   sys_entry(rmdir),      sys_entry(getdents),
-    sys_entry(link),     sys_entry(symlink),    sys_entry(getxattr),
+#ifdef SYS_getdents64
+    sys_entry(getdents64),
+#endif
+    sys_entry(access),   sys_entry(faccessat),
+#ifdef SYS_faccessat2
+    sys_entry(faccessat2),
+#endif
+    sys_entry(link),
+#ifdef SYS_linkat
+    sys_entry(linkat),
+#endif
+    sys_entry(symlink),
+#ifdef SYS_unlinkat
+    sys_entry(unlinkat),
+#endif
+    sys_entry(rename),   sys_entry(renameat),
+#ifdef SYS_renameat2
+    sys_entry(renameat2),
+#endif
+    sys_entry(getxattr),
     sys_entry(setxattr), sys_entry(execve),     sys_entry(execveat),
 };
 #undef sys_entry
@@ -252,14 +271,68 @@ static int handle_event(void *ctx, void *data, size_t len)
             "\"fd\": %u,",
             e->getdents.fd);
         break;
+#ifdef SYS_getdents64
+    case SYS_getdents64: printf(
+            "\"fd\": %u,",
+            e->getdents64.fd);
+        break;
+#endif
+    case SYS_access: printf(
+            "\"pathname\": \"%s\", \"mode\": %d,",
+            e->access.pathname, e->access.mode);
+        break;
+    case SYS_faccessat: printf(
+            "\"dfd\": %d, \"pathname\": \"%s\", \"mode\": %d, \"flags\": %d,",
+            e->faccessat.dfd, e->faccessat.pathname,
+            e->faccessat.mode, e->faccessat.flags);
+        break;
+#ifdef SYS_faccessat2
+    case SYS_faccessat2: printf(
+            "\"dfd\": %d, \"pathname\": \"%s\", \"mode\": %d, \"flags\": %d,",
+            e->faccessat2.dfd, e->faccessat2.pathname,
+            e->faccessat2.mode, e->faccessat2.flags);
+        break;
+#endif
     case SYS_link: printf(
             "\"oldname\": \"%s\", \"newname\": \"%s\",",
             e->link.oldname, e->link.newname);
         break;
+#ifdef SYS_linkat
+    case SYS_linkat: printf(
+            "\"olddfd\": %d, \"oldname\": \"%s\", "
+            "\"newdfd\": %d, \"newname\": \"%s\", \"flags\": %d,",
+            e->linkat.olddfd, e->linkat.oldname,
+            e->linkat.newdfd, e->linkat.newname, e->linkat.flags);
+        break;
+#endif
     case SYS_symlink: printf(
             "\"oldname\": \"%s\", \"newname\": \"%s\",",
             e->symlink.oldname, e->symlink.newname);
         break;
+#ifdef SYS_unlinkat
+    case SYS_unlinkat: printf(
+            "\"dfd\": %d, \"pathname\": \"%s\", \"flags\": %d,",
+            e->unlinkat.dfd, e->unlinkat.pathname, e->unlinkat.flags);
+        break;
+#endif
+    case SYS_rename: printf(
+            "\"oldname\": \"%s\", \"newname\": \"%s\",",
+            e->rename.oldname, e->rename.newname);
+        break;
+    case SYS_renameat: printf(
+            "\"olddfd\": %d, \"oldname\": \"%s\", "
+            "\"newdfd\": %d, \"newname\": \"%s\",",
+            e->renameat.olddfd, e->renameat.oldname,
+            e->renameat.newdfd, e->renameat.newname);
+        break;
+#ifdef SYS_renameat2
+    case SYS_renameat2: printf(
+            "\"olddfd\": %d, \"oldname\": \"%s\", "
+            "\"newdfd\": %d, \"newname\": \"%s\", \"flags\": %d,",
+            e->renameat2.olddfd, e->renameat2.oldname,
+            e->renameat2.newdfd, e->renameat2.newname, e->renameat2.flags);
+        break;
+#endif
     case SYS_getxattr: {
         char *decoded_value;
         __u8 *raw_value = e->getxattr.value;

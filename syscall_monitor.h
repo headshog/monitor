@@ -120,13 +120,63 @@ struct syscall_event {
             //unsigned int count;
         } getdents;
         struct {
+            unsigned int fd;
+            //struct linux_dirent64 __user *dirent;
+            //unsigned int count;
+        } getdents64;
+        struct {
+            char pathname[PATH_SIZE];
+            int mode;
+        } access;
+        struct {
+            int dfd;
+            char pathname[PATH_SIZE];
+            int mode;
+            int flags;
+        } faccessat;
+        struct {
+            int dfd;
+            char pathname[PATH_SIZE];
+            int mode;
+            int flags;
+        } faccessat2;
+        struct {
             char oldname[PATH_SIZE];
             char newname[PATH_SIZE];
         } link;
         struct {
+            int olddfd;
+            char oldname[PATH_SIZE];
+            int newdfd;
+            char newname[PATH_SIZE];
+            int flags;
+        } linkat;
+        struct {
             char oldname[PATH_SIZE];
             char newname[PATH_SIZE];
         } symlink;
+        struct {
+            int dfd;
+            char pathname[PATH_SIZE];
+            int flags;
+        } unlinkat;
+        struct {
+            char oldname[PATH_SIZE];
+            char newname[PATH_SIZE];
+        } rename;
+        struct {
+            int olddfd;
+            char oldname[PATH_SIZE];
+            int newdfd;
+            char newname[PATH_SIZE];
+        } renameat;
+        struct {
+            int olddfd;
+            char oldname[PATH_SIZE];
+            int newdfd;
+            char newname[PATH_SIZE];
+            int flags;
+        } renameat2;
         struct getxattr {
             char pathname[PATH_SIZE];
             char name[XNAME_SIZE];
