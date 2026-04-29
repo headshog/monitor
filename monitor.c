@@ -133,6 +133,58 @@ static inline bool is_string(const uint8_t *buf, size_t len)
 #define field_size(type, member) sizeof(((type *)0)->member)
 
 char base64_xattr[(field_size(struct getxattr, value) + 2) / 3 * 4 + 1];
+char smack_flags_names[256];
+
+static void append_flag_name(char *buf, size_t sz, size_t *used,
+                             const char *name)
+{
+    int n;
+
+    if (*used >= sz) {
+        return;
+    }
+    n = snprintf(buf + *used, sz - *used, "%s%s", *used ? "|" : "", name);
+    if (n < 0 || (size_t)n >= (sz - *used)) {
+        *used = sz;
+        return;
+    }
+    *used += (size_t)n;
+}
+
+static void format_smack_flags_names(__u32 flags, char *buf, size_t sz)
+{
+    size_t used = 0;
+    int bit;
+
+    if (sz == 0) {
+        return;
+    }
+    if (flags == 0) {
+        snprintf(buf, sz, "none");
+        return;
+    }
+
+    buf[0] = '\0';
+    if (flags & 0x01) {
+        append_flag_name(buf, sz, &used, "SMK_INODE_INSTANT");
+    }
+    if (flags & 0x02) {
+        append_flag_name(buf, sz, &used, "SMK_INODE_TRANSMUTE");
+    }
+    if (flags & 0x04) {
+        append_flag_name(buf, sz, &used, "SMK_INODE_CHANGED");
+    }
+    if (flags & 0x08) {
+        append_flag_name(buf, sz, &used, "SMK_INODE_IMPURE");
+    }
+    for (bit = 4; bit < 32; bit++) {
+        if (flags & (1U << bit)) {
+            char unknown[32];
+            snprintf(unknown, sizeof(unknown), "UNKNOWN_BIT_%d", bit);
+            append_flag_name(buf, sz, &used, unknown);
+        }
+    }
+}
 
 #define sys_entry(e) [SYS_##e] = #e
 static const char *syscall_names[500] = {
@@ -169,14 +221,18 @@ static const char *syscall_names[500] = {
 static int handle_event(void *ctx, void *data, size_t len)
 {
     struct syscall_event *e = data;
+    format_smack_flags_names(e->smack_flags, smack_flags_names, sizeof(smack_flags_names));
 
     printf("{ \"syscall\": \"%s\", \"proc\": \"%s\", \"pid\": %d, \"euid\": %d, \"egid\": %d, "
            "\"smack_subj\": \"%s\", \"smack_obj\": \"%s\", "
-           "\"smack_exec\": \"%s\", \"smack_mmap\": \"%s\", \"smack_flags\": %u, ",
+           "\"smack_exec\": \"%s\", \"smack_mmap\": \"%s\", "
+           "\"smack_flags\": %u, \"smack_flags_hex\": \"0x%x\", "
+           "\"smack_flags_names\": \"%s\", ",
         syscall_names[e->syscall_nr], e->comm,
         e->pid, e->euid, e->egid,
         e->smack_subj, e->smack_obj,
-        e->smack_exec, e->smack_mmap, e->smack_flags);
+        e->smack_exec, e->smack_mmap,
+        e->smack_flags, e->smack_flags, smack_flags_names);
 
     switch (e->syscall_nr) {
     case SYS_open: printf(

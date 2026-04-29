@@ -51,6 +51,16 @@ sudo grep -w smack_blob_sizes /proc/kallsyms
 - `smack_exec` — execute label inode
 - `smack_mmap` — mmap label inode
 - `smack_flags` — флаги `inode_smack.smk_flags`
+- `smack_flags_hex` — то же значение флагов в hex
+- `smack_flags_names` — текстовые имена установленных флагов (`SMK_INODE_*`)
+
+Расшифровка `smack_flags_names`:
+- `SMK_INODE_INSTANT` (`0x01`) — inode инициализирован Smack-блобом;
+- `SMK_INODE_TRANSMUTE` (`0x02`) — каталог в режиме transmute;
+- `SMK_INODE_CHANGED` (`0x04`) — метка inode была изменена через transmute-семантику;
+- `SMK_INODE_IMPURE` (`0x08`) — inode отмечен как участвовавший в impure-транзакции (bringup/debug сценарии).
+
+Если в значении встречаются биты вне списка, монитор выводит их как `UNKNOWN_BIT_N`.
 
 Если в `bpftool btf dump ...` нет `smack_blob_sizes`, монитор использует fallback:
 читает адрес символа `smack_blob_sizes` из `/proc/kallsyms` и передаёт его в BPF через `config_map`.
@@ -113,3 +123,21 @@ grep -w smack_blob_sizes /proc/kallsyms
 - `smack_obj`/`smack_exec`/`smack_mmap`/`smack_flags` — метки и флаги объекта inode.
 
 Примечание: порядок `CHECK` и JSON может слегка отличаться, так как события приходят через ring buffer.
+
+### Как выглядит блокировка SMACK в выводе
+
+Если операцию блокирует политика SMACK, в логе обычно видно:
+- в событии syscall `ret < 0` (в тесте это часто `ret=-1` + `errno=EACCES/EPERM`);
+- `smack_subj` обычно заполнен (кто выполнял действие);
+- `smack_obj` может быть пустым (`""`) на части путей;
+- `smack_flags` часто `0`;
+- в служебном выводе теста шаг будет `CHECK SKIP` (если этот errno ожидается) или `CHECK FAIL` (если не ожидался).
+
+Если операция не заблокирована:
+- `ret == 0` (или `ret >= 0` для `open/getdents`);
+- для файловых операций обычно есть непустой `smack_obj` (например `_`);
+- `smack_flags` обычно ненулевой (например `1`).
+
+Пример интерпретации:
+- разрешено: `rename ... ret: 0`, `smack_obj: "_"`;
+- заблокировано: `link ... ret: -1`, `errno=EPERM`, `smack_obj: ""`.
