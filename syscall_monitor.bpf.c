@@ -2350,7 +2350,16 @@ int trace_exit_setxattr(struct trace_event_raw_sys_exit *ctx)
 SEC("tracepoint/syscalls/sys_enter_execve")
 int trace_enter_execve(struct trace_event_raw_sys_enter *ctx)
 {
-    return save_syscall_args(ctx);
+    // comm at enter is the old process name (before exec replaces the image),
+    // so save args unconditionally; the exit handler filters by the new comm.
+    u64 key = bpf_get_current_pid_tgid();
+    struct syscall_args args = {};
+    long ret;
+    BPF_CORE_READ_INTO(&args.args, ctx, args);
+    if ((ret = bpf_map_update_elem(&args_map, &key, &args, BPF_ANY)) < 0) {
+        bpf_printk("update elem returns %ld", ret);
+    }
+    return 1;
 }
 
 SEC("tracepoint/syscalls/sys_exit_execve")
