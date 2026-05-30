@@ -1796,6 +1796,70 @@ int trace_enter_link(struct trace_event_raw_sys_enter *ctx)
     return save_syscall_args(ctx);
 }
 
+SEC("kprobe/security_inode_link")
+int BPF_KPROBE(handle_security_inode_link,
+               struct dentry *old_dentry,
+               struct inode *dir,
+               struct dentry *new_dentry)
+{
+    u64 id;
+    struct inode *inode;
+    struct smack_snapshot *snap;
+    struct smack_snapshot *existing;
+
+    if (!should_monitor()) {
+        return 0;
+    }
+
+    id = bpf_get_current_pid_tgid();
+    existing = bpf_map_lookup_elem(&link_smack_map, &id);
+    if (existing) {
+        return 0;
+    }
+    inode = BPF_CORE_READ(old_dentry, d_inode);
+    if (!inode) {
+        return 0;
+    }
+    snap = smack_scratch_get();
+    if (!snap || !capture_inode_smack(inode, snap)) {
+        return 0;
+    }
+    bpf_map_update_elem(&link_smack_map, &id, snap, BPF_ANY);
+    return 0;
+}
+
+SEC("kprobe/security_path_link")
+int BPF_KPROBE(handle_security_path_link,
+               struct dentry *old_dentry,
+               const struct path *new_dir,
+               struct dentry *new_dentry)
+{
+    u64 id;
+    struct inode *inode;
+    struct smack_snapshot *snap;
+    struct smack_snapshot *existing;
+
+    if (!should_monitor()) {
+        return 0;
+    }
+
+    id = bpf_get_current_pid_tgid();
+    existing = bpf_map_lookup_elem(&link_smack_map, &id);
+    if (existing) {
+        return 0;
+    }
+    inode = BPF_CORE_READ(old_dentry, d_inode);
+    if (!inode) {
+        return 0;
+    }
+    snap = smack_scratch_get();
+    if (!snap || !capture_inode_smack(inode, snap)) {
+        return 0;
+    }
+    bpf_map_update_elem(&link_smack_map, &id, snap, BPF_ANY);
+    return 0;
+}
+
 SEC("kprobe/vfs_link")
 int BPF_KPROBE(handle_vfs_link,
                struct dentry *old_dentry,
@@ -1852,9 +1916,16 @@ int BPF_KRETPROBE(handle_vfs_link_ret)
     old_dentry = ctxp->old_dentry;
     bpf_map_delete_elem(&link_ctx_map, &id);
 
+    /* security_inode_link / security_path_link уже захватили метку до нас.
+       Если по какой-то причине они не сработали — делаем fallback здесь. */
     ret = PT_REGS_RC(ctx);
     if (ret < 0) {
         return 0;
+    }
+
+    id = bpf_get_current_pid_tgid();
+    if (bpf_map_lookup_elem(&link_smack_map, &id)) {
+        return 0;   /* уже есть от security-пробы */
     }
 
     inode = BPF_CORE_READ(old_dentry, d_inode);
@@ -1883,7 +1954,9 @@ int trace_exit_link(struct trace_event_raw_sys_exit *ctx)
     bpf_get_path(e->link.oldname, (char *)e->args[0]);
     bpf_get_path(e->link.newname, (char *)e->args[1]);
     id = bpf_get_current_pid_tgid();
-    apply_smack_from_map(e, &link_smack_map, id, e->ret == 0);
+    /* Применяем всегда: inode источника существует до проверки,
+       метка осмысленна и при отказе (smack_obj — причина EACCES). */
+    apply_smack_from_map(e, &link_smack_map, id, 1);
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -1911,7 +1984,7 @@ int trace_exit_linkat(struct trace_event_raw_sys_exit *ctx)
     bpf_get_path(e->linkat.newname, (char *)e->args[3]);
     e->linkat.flags = e->args[4];
     id = bpf_get_current_pid_tgid();
-    apply_smack_from_map(e, &link_smack_map, id, e->ret == 0);
+    apply_smack_from_map(e, &link_smack_map, id, 1);
 
     bpf_ringbuf_submit(e, 0);
     return 0;
