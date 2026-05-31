@@ -696,7 +696,6 @@ read_syscall_args(struct trace_event_raw_sys_exit *ctx)
 {
     u64 key;
     u64 pid_tgid;
-    u64 uid_gid;
     struct syscall_args *args;
     struct syscall_event *e;
 
@@ -722,12 +721,15 @@ read_syscall_args(struct trace_event_raw_sys_exit *ctx)
     e->pid = pid_tgid & ((1uLL << 32) - 1);
     e->tgid = pid_tgid >> 32;
 
-    uid_gid = bpf_get_current_uid_gid();
-    e->euid = uid_gid & ((1uLL << 32) - 1);
-    e->egid = uid_gid >> 32;
+    {
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+        const struct cred *cred = BPF_CORE_READ(task, cred);
+        e->euid = BPF_CORE_READ(cred, euid).val;
+        e->egid = BPF_CORE_READ(cred, egid).val;
+    }
 
     bpf_get_current_comm(&e->comm, sizeof e->comm);
-    
+
     e->syscall_nr = ctx->id;
     __builtin_memcpy(e->args, args->args, sizeof e->args);
     fill_subject_smack(e);
@@ -2510,9 +2512,12 @@ int trace_enter_exit(struct trace_event_raw_sys_enter *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid & ((1uLL << 32) - 1);
     e->tgid = pid_tgid >> 32;
-    u64 uid_gid = bpf_get_current_uid_gid();
-    e->euid = uid_gid & ((1uLL << 32) - 1);
-    e->egid = uid_gid >> 32;
+    {
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+        const struct cred *cred = BPF_CORE_READ(task, cred);
+        e->euid = BPF_CORE_READ(cred, euid).val;
+        e->egid = BPF_CORE_READ(cred, egid).val;
+    }
 
     bpf_get_current_comm(&e->comm, sizeof e->comm);
 
@@ -2548,9 +2553,12 @@ int trace_enter_exit_group(struct trace_event_raw_sys_enter *ctx)
     u64 pid_tgid = bpf_get_current_pid_tgid();
     e->pid = pid_tgid & ((1uLL << 32) - 1);
     e->tgid = pid_tgid >> 32;
-    u64 uid_gid = bpf_get_current_uid_gid();
-    e->euid = uid_gid & ((1uLL << 32) - 1);
-    e->egid = uid_gid >> 32;
+    {
+        struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+        const struct cred *cred = BPF_CORE_READ(task, cred);
+        e->euid = BPF_CORE_READ(cred, euid).val;
+        e->egid = BPF_CORE_READ(cred, egid).val;
+    }
 
     bpf_get_current_comm(&e->comm, sizeof e->comm);
 
