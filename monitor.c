@@ -215,6 +215,9 @@ static const char *syscall_names[500] = {
 #endif
     sys_entry(getxattr),
     sys_entry(setxattr), sys_entry(execve),     sys_entry(execveat),
+    sys_entry(setuid),   sys_entry(setgid),
+    sys_entry(setreuid), sys_entry(setregid),
+    sys_entry(setresuid),sys_entry(setresgid),
 };
 #undef sys_entry
 
@@ -451,6 +454,30 @@ static int handle_event(void *ctx, void *data, size_t len)
     case SYS_exit_group: printf(
               "\"error_code\": %d,",
               e->exit_group.error_code);
+        break;
+    case SYS_setuid: printf(
+              "\"uid\": %u,",
+              e->setuid.uid);
+        break;
+    case SYS_setgid: printf(
+              "\"gid\": %u,",
+              e->setgid.gid);
+        break;
+    case SYS_setreuid: printf(
+              "\"ruid\": %u, \"euid_new\": %u,",
+              e->setreuid.ruid, e->setreuid.euid);
+        break;
+    case SYS_setregid: printf(
+              "\"rgid\": %u, \"egid_new\": %u,",
+              e->setregid.rgid, e->setregid.egid);
+        break;
+    case SYS_setresuid: printf(
+              "\"ruid\": %u, \"euid_new\": %u, \"suid\": %u,",
+              e->setresuid.ruid, e->setresuid.euid, e->setresuid.suid);
+        break;
+    case SYS_setresgid: printf(
+              "\"rgid\": %u, \"egid_new\": %u, \"sgid\": %u,",
+              e->setresgid.rgid, e->setresgid.egid, e->setresgid.sgid);
         break;
     default:
         fprintf(stderr, "Unknown syscall %d\n", e->syscall_nr);

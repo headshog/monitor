@@ -149,6 +149,22 @@ struct {
     __type(value, struct execve_data);
 } execve_map SEC(".maps");
 
+/* Credentials вызывающего процесса, снятые на sys_enter_execve —
+ * до того как ядро применит setuid/setgid биты бинаря.
+ * Используются чтобы euid/egid в событии execve отражали того,
+ * кто запустил бинарь, а не привилегии самого бинаря. */
+struct execve_caller_creds {
+    __u32 euid;
+    __u32 egid;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, u64);
+    __type(value, struct execve_caller_creds);
+} execve_caller_creds_map SEC(".maps");
+
 struct dentry_call_ctx {
     struct dentry *dentry;
     int depth;
@@ -2434,6 +2450,16 @@ int trace_enter_execve(struct trace_event_raw_sys_enter *ctx)
     if ((ret = bpf_map_update_elem(&args_map, &key, &args, BPF_ANY)) < 0) {
         bpf_printk("update elem returns %ld", ret);
     }
+
+    // Сохраняем euid/egid вызывающего ДО того как ядро применит
+    // setuid/setgid биты бинаря при commit_creds.
+    struct execve_caller_creds caller = {};
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    const struct cred *cred = BPF_CORE_READ(task, cred);
+    caller.euid = BPF_CORE_READ(cred, euid).val;
+    caller.egid = BPF_CORE_READ(cred, egid).val;
+    bpf_map_update_elem(&execve_caller_creds_map, &key, &caller, BPF_ANY);
+
     return 1;
 }
 
@@ -2441,8 +2467,23 @@ SEC("tracepoint/syscalls/sys_exit_execve")
 int trace_exit_execve(struct trace_event_raw_sys_exit *ctx)
 {
     struct syscall_event *e;
+    u64 id = bpf_get_current_pid_tgid();
+
     if (!(e = read_syscall_args(ctx))) {
+        // Чистим map даже если событие не эмитируется
+        bpf_map_delete_elem(&execve_caller_creds_map, &id);
         return 0;
+    }
+
+    // read_syscall_args прочитал euid/egid из нового образа процесса
+    // (после commit_creds с setuid-битом). Перезаписываем credentials
+    // вызывающего, снятыми на входе в syscall — до применения setuid.
+    struct execve_caller_creds *caller =
+        bpf_map_lookup_elem(&execve_caller_creds_map, &id);
+    if (caller) {
+        e->euid = caller->euid;
+        e->egid = caller->egid;
+        bpf_map_delete_elem(&execve_caller_creds_map, &id);
     }
 
     if (e->ret < 0) {
@@ -2571,6 +2612,120 @@ int trace_enter_exit_group(struct trace_event_raw_sys_enter *ctx)
     e->ret = 0;
     e->exit_group.error_code = e->args[0];
 
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* setuid / setgid / setreuid / setregid / setresuid / setresgid       */
+/* Это credential-операции — smack object не нужен (нет inode).        */
+/* smack_subj заполняется в read_syscall_args автоматически.           */
+/* ------------------------------------------------------------------ */
+
+SEC("tracepoint/syscalls/sys_enter_setuid")
+int trace_enter_setuid(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_setuid")
+int trace_exit_setuid(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx)))
+        return 0;
+    e->setuid.uid = (__u32)e->args[0];
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setgid")
+int trace_enter_setgid(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_setgid")
+int trace_exit_setgid(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx)))
+        return 0;
+    e->setgid.gid = (__u32)e->args[0];
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setreuid")
+int trace_enter_setreuid(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_setreuid")
+int trace_exit_setreuid(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx)))
+        return 0;
+    e->setreuid.ruid = (__u32)e->args[0];
+    e->setreuid.euid = (__u32)e->args[1];
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setregid")
+int trace_enter_setregid(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_setregid")
+int trace_exit_setregid(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx)))
+        return 0;
+    e->setregid.rgid = (__u32)e->args[0];
+    e->setregid.egid = (__u32)e->args[1];
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setresuid")
+int trace_enter_setresuid(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_setresuid")
+int trace_exit_setresuid(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx)))
+        return 0;
+    e->setresuid.ruid = (__u32)e->args[0];
+    e->setresuid.euid = (__u32)e->args[1];
+    e->setresuid.suid = (__u32)e->args[2];
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_setresgid")
+int trace_enter_setresgid(struct trace_event_raw_sys_enter *ctx)
+{
+    return save_syscall_args(ctx);
+}
+
+SEC("tracepoint/syscalls/sys_exit_setresgid")
+int trace_exit_setresgid(struct trace_event_raw_sys_exit *ctx)
+{
+    struct syscall_event *e;
+    if (!(e = read_syscall_args(ctx)))
+        return 0;
+    e->setresgid.rgid = (__u32)e->args[0];
+    e->setresgid.egid = (__u32)e->args[1];
+    e->setresgid.sgid = (__u32)e->args[2];
     bpf_ringbuf_submit(e, 0);
     return 0;
 }

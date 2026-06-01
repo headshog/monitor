@@ -205,6 +205,30 @@ struct syscall_event {
         struct {
             int error_code;
         } exit;
+        struct {
+            __u32 uid;      /* -1 (UINT_MAX) = не менять */
+        } setuid;
+        struct {
+            __u32 gid;
+        } setgid;
+        struct {
+            __u32 ruid;     /* -1 = не менять */
+            __u32 euid;
+        } setreuid;
+        struct {
+            __u32 rgid;
+            __u32 egid;
+        } setregid;
+        struct {
+            __u32 ruid;
+            __u32 euid;
+            __u32 suid;     /* saved set-user-ID */
+        } setresuid;
+        struct {
+            __u32 rgid;
+            __u32 egid;
+            __u32 sgid;
+        } setresgid;
     };
 } __attribute__((packed));
 
