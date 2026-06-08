@@ -239,46 +239,46 @@ static int handle_event(void *ctx, void *data, size_t len)
 
     switch (e->syscall_nr) {
     case SYS_open: printf(
-            "\"pathname\": \"%s\", \"flags\": %d, \"mode\": %d, "
+            "\"pathname\": \"%s\", \"flags\": %d, \"mode\": %d, ",
+            e->open.pathname, e->open.flags,
+            e->open.mode); if (e->ret >= 0) printf(
             "\"uid\": %u, \"gid\": %u, "
             "\"ino\": %u, \"perms\": %u, ",
-            e->open.pathname, e->open.flags,
-            e->open.mode, e->open.uid,
-            e->open.gid, e->open.ino,
-            e->open.perms);
+            e->open.uid, e->open.gid,
+            e->open.ino, e->open.perms);
         break;
     case SYS_openat: printf(
-            "\"dfd\": %d, \"pathname\": \"%s\", \"flags\": %d, "
-            "\"mode\": %d, \"uid\": %u, \"gid\": %u, "
-            "\"ino\": %u, \"perms\": %u, ",
+            "\"dfd\": %d, \"pathname\": \"%s\", \"flags\": %d, \"mode\": %d, ",
             e->openat.dfd, e->openat.pathname,
-            e->openat.flags, e->openat.mode,
+            e->openat.flags, e->openat.mode); if (e->ret >= 0) printf(
+            "\"uid\": %u, \"gid\": %u, "
+            "\"ino\": %u, \"perms\": %u, ",
             e->openat.uid, e->openat.gid,
             e->openat.ino, e->openat.perms);
         break;
     case SYS_creat: printf(
-            "\"pathname\": \"%s\", \"mode\": %d, "
+            "\"pathname\": \"%s\", \"mode\": %d, ",
+            e->creat.pathname, e->creat.mode); if (e->ret >= 0) printf(
             "\"uid\": %u, \"gid\": %u, "
             "\"ino\": %u, \"perms\": %u, ",
-            e->creat.pathname, e->creat.mode,
             e->creat.uid, e->creat.gid,
             e->creat.ino, e->creat.perms);
         break;
-    case SYS_mkdir: printf("\"pathname\": \"%s\", \"mode\": %d, "
+    case SYS_mkdir: printf("\"pathname\": \"%s\", \"mode\": %d, ",
+            e->mkdir.pathname, e->mkdir.mode); if (e->ret == 0) printf(
             "\"uid\": %u, \"gid\": %u, "
             "\"ino\": %u, \"perms\": %u, ",
-            e->mkdir.pathname, e->mkdir.mode,
             e->mkdir.uid, e->mkdir.gid,
             e->mkdir.ino, e->mkdir.perms);
         break;
     case SYS_mkdirat: printf(
-            "\"dfd\": %d, \"pathname\": \"%s\", \"mode\": %d, "
+            "\"dfd\": %d, \"pathname\": \"%s\", \"mode\": %d, ",
+            e->mkdirat.dfd, e->mkdirat.pathname,
+            e->mkdirat.mode); if (e->ret == 0) printf(
             "\"uid\": %u, \"gid\": %u, "
             "\"ino\": %u, \"perms\": %u, ",
-            e->mkdirat.dfd, e->mkdirat.pathname,
-            e->mkdirat.mode, e->mkdirat.uid,
-            e->mkdirat.gid, e->mkdirat.ino,
-            e->mkdirat.perms);
+            e->mkdirat.uid, e->mkdirat.gid,
+            e->mkdirat.ino, e->mkdirat.perms);
         break;
     case SYS_chdir: printf(
             "\"dir\": \"%s\", ",
@@ -289,26 +289,30 @@ static int handle_event(void *ctx, void *data, size_t len)
             e->fchdir.fd);
         break;
     case SYS_chmod: printf(
-            "\"pathname\": \"%s\", \"mode\": %d, \"perms\": %u,",
-            e->chmod.pathname, e->chmod.mode,
+            "\"pathname\": \"%s\", \"mode\": %d, ",
+            e->chmod.pathname, e->chmod.mode); if (e->ret == 0) printf(
+            "\"perms\": %u,",
             e->chmod.perms);
         break;
     case SYS_fchmod: printf(
-            "\"fd\": %d, \"mode\": %d, \"perms\": %u, ",
-            e->fchmod.fd, e->fchmod.mode,
+            "\"fd\": %d, \"mode\": %d, ",
+            e->fchmod.fd, e->fchmod.mode); if (e->ret == 0) printf(
+            "\"perms\": %u, ",
             e->fchmod.perms);
         break;
     case SYS_chown: printf(
-            "\"pathname\": \"%s\", \"owner\": %d, \"group\": %d, "
-            "\"perms\": %u,",
+            "\"pathname\": \"%s\", \"owner\": %d, \"group\": %d, ",
             e->chown.pathname, e->chown.owner,
-            e->chown.group, e->chown.perms);
+            e->chown.group); if (e->ret == 0) printf(
+            "\"perms\": %u,",
+            e->chown.perms);
         break;
     case SYS_fchown: printf(
-            "\"fd\": \"%d\", \"owner\": %d, \"group\": %d, "
-            "\"perms\": %u, ",
+            "\"fd\": \"%d\", \"owner\": %d, \"group\": %d, ",
             e->fchown.fd, e->fchown.owner,
-            e->fchown.group, e->fchown.perms);
+            e->fchown.group); if (e->ret == 0) printf(
+            "\"perms\": %u, ",
+            e->fchown.perms);
         break;
     case SYS_close: printf(
             "\"fd\": %u,",
@@ -583,13 +587,17 @@ load(void)
         fprintf(stderr, "Failed to mkdir " MAPS_PATH "; error %d\n", err);
         goto END;
     }
-    if ((err = bpf_map__pin(skel->maps.events, MAPS_PATH "/events")) != 0) {
-        fprintf(stderr, "Failed to pin map 'events'; error %d\n", err);
+    if ((err = bpf_object__pin_maps(skel->obj, MAPS_PATH)) != 0) {
+        fprintf(stderr, "Failed to pin maps; error %d\n", err);
         goto END;
     }
 
-    if ((err = bpf_map__pin(skel->maps.config_map, MAPS_PATH "/config_map")) != 0) {
-        fprintf(stderr, "Failed to pin map 'config_map'; error %d\n", err);
+    if ((err = mkdir(PROGS_PATH, 0700)) != 0) {
+        fprintf(stderr, "Failed to mkdir " PROGS_PATH "; error %d\n", err);
+        goto END;
+    }
+    if ((err = bpf_object__pin_programs(skel->obj, PROGS_PATH)) != 0) {
+        fprintf(stderr, "Failed to pin programs; error %d\n", err);
         goto END;
     }
 
@@ -618,15 +626,6 @@ load(void)
     cfg.filter_tst = 1;
     bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
 
-
-    if ((err = mkdir(PROGS_PATH, 0700)) != 0) {
-        fprintf(stderr, "Failed to mkdir " PROGS_PATH "; error %d\n", err);
-        goto END;
-    }
-    if ((err = bpf_object__pin_programs(skel->obj, PROGS_PATH)) != 0) {
-        fprintf(stderr, "Failed to pin programs; error %d\n", err);
-        goto END;
-    }
     if ((err = syscall_monitor_bpf__attach(skel)) != 0) { // attach all links
         fprintf(stderr, "Failed to attach links; error %d\n", err);
         goto END;
@@ -670,23 +669,11 @@ run(int argc, char *argv[])
 {
     struct ring_buffer *rb = 0;
     int err = 0;
-
-    warn_if_smack_unavailable();
-
-    int cfg_fd;
-    if ((cfg_fd = bpf_obj_get(MAPS_PATH "/config_map")) < 0) {
-        fprintf(stderr, "Failed to open the pinned map 'config_map'; error %d\n", cfg_fd);
-        return 1;
-    }
+    int cfg_fd = -1;
     struct monitor_config cfg = {0};
     __u32 key = 0;
 
-    if (bpf_map_lookup_elem(cfg_fd, &key, &cfg) != 0) {
-        cfg.filter_tst = 1;
-        cfg.smack_blob_sizes_addr = 0;
-    }
-    cfg.enabled = 1;
-    bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
+    warn_if_smack_unavailable();
 
     int events_fd;
     if ((events_fd = bpf_obj_get(MAPS_PATH "/events")) < 0) {
@@ -700,6 +687,19 @@ run(int argc, char *argv[])
         err = 1;
         goto END;
     }
+
+    if ((cfg_fd = bpf_obj_get(MAPS_PATH "/config_map")) < 0) {
+        fprintf(stderr, "Failed to open the pinned map 'config_map'; error %d\n", cfg_fd);
+        err = cfg_fd;
+        goto END;
+    }
+
+    if (bpf_map_lookup_elem(cfg_fd, &key, &cfg) != 0) {
+        cfg.filter_tst = 1;
+        cfg.smack_blob_sizes_addr = 0;
+    }
+    cfg.enabled = 1;
+    bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
 
     signal(SIGINT, set_exited);
 
@@ -733,8 +733,10 @@ run(int argc, char *argv[])
 END:
     if (rb) ring_buffer__free(rb);
 
-    cfg.enabled = 0;
-    bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
+    if (cfg_fd != -1) {
+        cfg.enabled = 0;
+        bpf_map_update_elem(cfg_fd, &key, &cfg, BPF_ANY);
+    }
 
     return err == 0 ? 0 : 1;
 }

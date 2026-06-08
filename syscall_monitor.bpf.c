@@ -5,6 +5,7 @@
 #include "syscall_monitor.h"
 #include "utils.h"
 
+#define SYS_execve 59
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -563,7 +564,6 @@ int BPF_KPROBE(handle_chmod_common)
     struct chmod_ctx data = {};
     data.path = (struct path *)PT_REGS_PARM1(ctx);
     bpf_map_update_elem(&chmod_map, &id, &data, BPF_ANY);
-    bpf_printk("kprobe/chmod_common: %llu", id);
 
     return 0;
 }
@@ -673,18 +673,16 @@ static __always_inline
 int
 save_syscall_args(struct trace_event_raw_sys_enter *ctx)
 {
-    u64 key;
-    struct syscall_args args = {};
-    long ret;
-
     if (!should_monitor()) {
         return 0;
     }
 
-    BPF_CORE_READ_INTO(&args.args, ctx, args);
-    key = bpf_get_current_pid_tgid();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct syscall_args args = {};
+    long ret;
 
-    if ((ret = bpf_map_update_elem(&args_map, &key, &args, BPF_ANY)) < 0) {
+    BPF_CORE_READ_INTO(&args.args, ctx, args);
+    if ((ret = bpf_map_update_elem(&args_map, &pid_tgid, &args, BPF_ANY)) < 0) {
         bpf_printk("update elem returns %ld", ret);
     }
 
@@ -710,30 +708,33 @@ static __always_inline
 struct syscall_event *
 read_syscall_args(struct trace_event_raw_sys_exit *ctx)
 {
-    u64 key;
-    u64 pid_tgid;
-    struct syscall_args *args;
-    struct syscall_event *e;
-
-    key = bpf_get_current_pid_tgid();
-    if (!(args = bpf_map_lookup_elem(&args_map, &key))) {
-        return 0;
-    }
-    bpf_map_delete_elem(&args_map, &key);
     if (!should_monitor()) {
         return 0;
     }
 
-    e = bpf_ringbuf_reserve(&events, sizeof *e, 0);
+    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof *e, 0);
     if (!e) {
         bpf_printk("ringbuffer overflow");
         return 0;
     }
     init_event_smack(e);
 
-    e->ts = bpf_ktime_get_ns();
+    u64 pid_tgid = bpf_get_current_pid_tgid();
 
-    pid_tgid = bpf_get_current_pid_tgid();
+    struct syscall_args *args;
+    if (!(args = bpf_map_lookup_elem(&args_map, &pid_tgid))) {
+        if (ctx->id != SYS_execve) {
+            bpf_printk("lookup failed for non execve");
+        }
+        /* first execve is called without sys_enter (i.e. without save_syscall_args) */
+        struct syscall_args zero_args = {0};
+        __builtin_memcpy(e->args, &zero_args.args, sizeof e->args);
+    } else {
+        __builtin_memcpy(e->args, args->args, sizeof e->args);
+    }
+    bpf_map_delete_elem(&args_map, &pid_tgid);
+
+    e->ts = bpf_ktime_get_ns();
     e->pid = pid_tgid & ((1uLL << 32) - 1);
     e->tgid = pid_tgid >> 32;
 
@@ -745,11 +746,8 @@ read_syscall_args(struct trace_event_raw_sys_exit *ctx)
     }
 
     bpf_get_current_comm(&e->comm, sizeof e->comm);
-
     e->syscall_nr = ctx->id;
-    __builtin_memcpy(e->args, args->args, sizeof e->args);
     fill_subject_smack(e);
-
     e->ret = ctx->ret;
 
     return e;
